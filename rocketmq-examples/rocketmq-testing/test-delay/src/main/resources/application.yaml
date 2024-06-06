@@ -1,0 +1,12 @@
+global:
+  topic: TopicTest
+  consumer:
+    broadcasting:
+      group: test-consume-delay-broadcasting-group
+    clustering:
+      group: test-consume-delay-clustering-group
+
+rocketmq:
+  name-server: 127.0.0.1:9876
+  producer:
+    group: test-send-delay-group

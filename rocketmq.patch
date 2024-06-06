@@ -1,0 +1,629 @@
+diff --git a/broker/src/main/java/org/apache/rocketmq/broker/BrokerController.java b/broker/src/main/java/org/apache/rocketmq/broker/BrokerController.java
+index f2e20f976..52f986b4c 100644
+--- a/broker/src/main/java/org/apache/rocketmq/broker/BrokerController.java
++++ b/broker/src/main/java/org/apache/rocketmq/broker/BrokerController.java
+@@ -588,10 +588,12 @@ public class BrokerController {
+         ClientManageProcessor clientProcessor = new ClientManageProcessor(this);
+         this.remotingServer.registerProcessor(RequestCode.HEART_BEAT, clientProcessor, this.heartbeatExecutor);
+         this.remotingServer.registerProcessor(RequestCode.UNREGISTER_CLIENT, clientProcessor, this.clientManageExecutor);
++        this.remotingServer.registerProcessor(RequestCode.UNREGISTER_CLIENT_BY_CLIENTID, clientProcessor, this.clientManageExecutor);
+         this.remotingServer.registerProcessor(RequestCode.CHECK_CLIENT_CONFIG, clientProcessor, this.clientManageExecutor);
+ 
+         this.fastRemotingServer.registerProcessor(RequestCode.HEART_BEAT, clientProcessor, this.heartbeatExecutor);
+         this.fastRemotingServer.registerProcessor(RequestCode.UNREGISTER_CLIENT, clientProcessor, this.clientManageExecutor);
++        this.fastRemotingServer.registerProcessor(RequestCode.UNREGISTER_CLIENT_BY_CLIENTID, clientProcessor, this.clientManageExecutor);
+         this.fastRemotingServer.registerProcessor(RequestCode.CHECK_CLIENT_CONFIG, clientProcessor, this.clientManageExecutor);
+ 
+         /**
+diff --git a/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerGroupInfo.java b/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerGroupInfo.java
+index c90d4942a..18fa44da0 100644
+--- a/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerGroupInfo.java
++++ b/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerGroupInfo.java
+@@ -17,6 +17,7 @@
+ package org.apache.rocketmq.broker.client;
+ 
+ import io.netty.channel.Channel;
++
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.util.List;
+@@ -24,6 +25,7 @@ import java.util.Map.Entry;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ConcurrentMap;
++
+ import org.apache.rocketmq.common.constant.LoggerName;
+ import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
+ import org.apache.rocketmq.logging.InternalLogger;
+@@ -36,16 +38,16 @@ public class ConsumerGroupInfo {
+     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
+     private final String groupName;
+     private final ConcurrentMap<String/* Topic */, SubscriptionData> subscriptionTable =
+-        new ConcurrentHashMap<String, SubscriptionData>();
++            new ConcurrentHashMap<String, SubscriptionData>();
+     private final ConcurrentMap<Channel, ClientChannelInfo> channelInfoTable =
+-        new ConcurrentHashMap<Channel, ClientChannelInfo>(16);
++            new ConcurrentHashMap<Channel, ClientChannelInfo>(16);
+     private volatile ConsumeType consumeType;
+     private volatile MessageModel messageModel;
+     private volatile ConsumeFromWhere consumeFromWhere;
+     private volatile long lastUpdateTimestamp = System.currentTimeMillis();
+ 
+     public ConsumerGroupInfo(String groupName, ConsumeType consumeType, MessageModel messageModel,
+-        ConsumeFromWhere consumeFromWhere) {
++                             ConsumeFromWhere consumeFromWhere) {
+         this.groupName = groupName;
+         this.consumeType = consumeType;
+         this.messageModel = messageModel;
+@@ -101,12 +103,24 @@ public class ConsumerGroupInfo {
+         }
+     }
+ 
++    public void unregisterChannelByClientId(final ClientChannelInfo inputInfo) {
++        Iterator<Entry<Channel, ClientChannelInfo>> it = channelInfoTable.entrySet().iterator();
++        while (it.hasNext()) {
++            Entry<Channel, ClientChannelInfo> entry = it.next();
++            ClientChannelInfo clientChannelInfo = entry.getValue();
++            if (clientChannelInfo.getClientId().equals(inputInfo.getClientId())) {
++                log.info("unregister a consumer by clientId [{}] from consumerGroupInfo {}", this.groupName, clientChannelInfo.toString());
++                it.remove();
++            }
++        }
++    }
++
+     public boolean doChannelCloseEvent(final String remoteAddr, final Channel channel) {
+         final ClientChannelInfo info = this.channelInfoTable.remove(channel);
+         if (info != null) {
+             log.warn(
+-                "NETTY EVENT: remove not active channel[{}] from ConsumerGroupInfo groupChannelTable, consumer group: {}",
+-                info.toString(), groupName);
++                    "NETTY EVENT: remove not active channel[{}] from ConsumerGroupInfo groupChannelTable, consumer group: {}",
++                    info.toString(), groupName);
+             return true;
+         }
+ 
+@@ -114,7 +128,7 @@ public class ConsumerGroupInfo {
+     }
+ 
+     public boolean updateChannel(final ClientChannelInfo infoNew, ConsumeType consumeType,
+-        MessageModel messageModel, ConsumeFromWhere consumeFromWhere) {
++                                 MessageModel messageModel, ConsumeFromWhere consumeFromWhere) {
+         boolean updated = false;
+         this.consumeType = consumeType;
+         this.messageModel = messageModel;
+@@ -125,7 +139,7 @@ public class ConsumerGroupInfo {
+             ClientChannelInfo prev = this.channelInfoTable.put(infoNew.getChannel(), infoNew);
+             if (null == prev) {
+                 log.info("new consumer connected, group: {} {} {} channel: {}", this.groupName, consumeType,
+-                    messageModel, infoNew.toString());
++                        messageModel, infoNew.toString());
+                 updated = true;
+             }
+ 
+@@ -133,9 +147,9 @@ public class ConsumerGroupInfo {
+         } else {
+             if (!infoOld.getClientId().equals(infoNew.getClientId())) {
+                 log.error("[BUG] consumer channel exist in broker, but clientId not equal. GROUP: {} OLD: {} NEW: {} ",
+-                    this.groupName,
+-                    infoOld.toString(),
+-                    infoNew.toString());
++                        this.groupName,
++                        infoOld.toString(),
++                        infoNew.toString());
+                 this.channelInfoTable.put(infoNew.getChannel(), infoNew);
+             }
+         }
+@@ -156,15 +170,15 @@ public class ConsumerGroupInfo {
+                 if (null == prev) {
+                     updated = true;
+                     log.info("subscription changed, add new topic, group: {} {}",
+-                        this.groupName,
+-                        sub.toString());
++                            this.groupName,
++                            sub.toString());
+                 }
+             } else if (sub.getSubVersion() > old.getSubVersion()) {
+                 if (this.consumeType == ConsumeType.CONSUME_PASSIVELY) {
+                     log.info("subscription changed, group: {} OLD: {} NEW: {}",
+-                        this.groupName,
+-                        old.toString(),
+-                        sub.toString()
++                            this.groupName,
++                            old.toString(),
++                            sub.toString()
+                     );
+                 }
+ 
+@@ -187,9 +201,9 @@ public class ConsumerGroupInfo {
+ 
+             if (!exist) {
+                 log.warn("subscription changed, group: {} remove topic {} {}",
+-                    this.groupName,
+-                    oldTopic,
+-                    next.getValue().toString()
++                        this.groupName,
++                        oldTopic,
++                        next.getValue().toString()
+                 );
+ 
+                 it.remove();
+diff --git a/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerManager.java b/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerManager.java
+index cb6065540..0d2abe7c8 100644
+--- a/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerManager.java
++++ b/broker/src/main/java/org/apache/rocketmq/broker/client/ConsumerManager.java
+@@ -17,12 +17,14 @@
+ package org.apache.rocketmq.broker.client;
+ 
+ import io.netty.channel.Channel;
++
+ import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.Map.Entry;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ConcurrentMap;
++
+ import org.apache.rocketmq.common.constant.LoggerName;
+ import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
+ import org.apache.rocketmq.logging.InternalLogger;
+@@ -37,7 +39,7 @@ public class ConsumerManager {
+     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
+     private static final long CHANNEL_EXPIRED_TIMEOUT = 1000 * 120;
+     private final ConcurrentMap<String/* Group */, ConsumerGroupInfo> consumerTable =
+-        new ConcurrentHashMap<String, ConsumerGroupInfo>(1024);
++            new ConcurrentHashMap<String, ConsumerGroupInfo>(1024);
+     private final ConsumerIdsChangeListener consumerIdsChangeListener;
+ 
+     public ConsumerManager(final ConsumerIdsChangeListener consumerIdsChangeListener) {
+@@ -85,7 +87,7 @@ public class ConsumerManager {
+                     ConsumerGroupInfo remove = this.consumerTable.remove(next.getKey());
+                     if (remove != null) {
+                         log.info("unregister consumer ok, no any connection, and remove consumer group, {}",
+-                            next.getKey());
++                                next.getKey());
+                         this.consumerIdsChangeListener.handle(ConsumerGroupEvent.UNREGISTER, next.getKey());
+                     }
+                 }
+@@ -96,8 +98,8 @@ public class ConsumerManager {
+     }
+ 
+     public boolean registerConsumer(final String group, final ClientChannelInfo clientChannelInfo,
+-        ConsumeType consumeType, MessageModel messageModel, ConsumeFromWhere consumeFromWhere,
+-        final Set<SubscriptionData> subList, boolean isNotifyConsumerIdsChangedEnable) {
++                                    ConsumeType consumeType, MessageModel messageModel, ConsumeFromWhere consumeFromWhere,
++                                    final Set<SubscriptionData> subList, boolean isNotifyConsumerIdsChangedEnable) {
+ 
+         ConsumerGroupInfo consumerGroupInfo = this.consumerTable.get(group);
+         if (null == consumerGroupInfo) {
+@@ -107,8 +109,8 @@ public class ConsumerManager {
+         }
+ 
+         boolean r1 =
+-            consumerGroupInfo.updateChannel(clientChannelInfo, consumeType, messageModel,
+-                consumeFromWhere);
++                consumerGroupInfo.updateChannel(clientChannelInfo, consumeType, messageModel,
++                        consumeFromWhere);
+         boolean r2 = consumerGroupInfo.updateSubscription(subList);
+ 
+         if (r1 || r2) {
+@@ -123,7 +125,7 @@ public class ConsumerManager {
+     }
+ 
+     public void unregisterConsumer(final String group, final ClientChannelInfo clientChannelInfo,
+-        boolean isNotifyConsumerIdsChangedEnable) {
++                                   boolean isNotifyConsumerIdsChangedEnable) {
+         ConsumerGroupInfo consumerGroupInfo = this.consumerTable.get(group);
+         if (null != consumerGroupInfo) {
+             consumerGroupInfo.unregisterChannel(clientChannelInfo);
+@@ -141,6 +143,27 @@ public class ConsumerManager {
+         }
+     }
+ 
++    /**
++     * proxy fix: unregister client by ClientID
++     * only called from proxy
++     * @param group
++     * @param clientChannelInfo
++     * @param isNotifyConsumerIdsChangedEnable
++     */
++    public void unregisterConsumerByClientId(final String group, final ClientChannelInfo clientChannelInfo,
++                                             boolean isNotifyConsumerIdsChangedEnable) {
++        ConsumerGroupInfo consumerGroupInfo = this.consumerTable.get(group);
++        if (null != consumerGroupInfo) {
++            consumerGroupInfo.unregisterChannelByClientId(clientChannelInfo);
++            if (consumerGroupInfo.getChannelInfoTable().isEmpty()) {
++                ConsumerGroupInfo remove = this.consumerTable.remove(group);
++                if (remove != null) {
++                    log.info("unregister consumer ok, no any connection, and remove consumer group, {}", group);
++                }
++            }
++        }
++    }
++
+     public void scanNotActiveChannel() {
+         Iterator<Entry<String, ConsumerGroupInfo>> it = this.consumerTable.entrySet().iterator();
+         while (it.hasNext()) {
+@@ -148,7 +171,7 @@ public class ConsumerManager {
+             String group = next.getKey();
+             ConsumerGroupInfo consumerGroupInfo = next.getValue();
+             ConcurrentMap<Channel, ClientChannelInfo> channelInfoTable =
+-                consumerGroupInfo.getChannelInfoTable();
++                    consumerGroupInfo.getChannelInfoTable();
+ 
+             Iterator<Entry<Channel, ClientChannelInfo>> itChannel = channelInfoTable.entrySet().iterator();
+             while (itChannel.hasNext()) {
+@@ -157,8 +180,8 @@ public class ConsumerManager {
+                 long diff = System.currentTimeMillis() - clientChannelInfo.getLastUpdateTimestamp();
+                 if (diff > CHANNEL_EXPIRED_TIMEOUT) {
+                     log.warn(
+-                        "SCAN: remove expired channel from ConsumerManager consumerTable. channel={}, consumerGroup={}",
+-                        RemotingHelper.parseChannelRemoteAddr(clientChannelInfo.getChannel()), group);
++                            "SCAN: remove expired channel from ConsumerManager consumerTable. channel={}, consumerGroup={}",
++                            RemotingHelper.parseChannelRemoteAddr(clientChannelInfo.getChannel()), group);
+                     RemotingUtil.closeChannel(clientChannelInfo.getChannel());
+                     itChannel.remove();
+                 }
+@@ -166,8 +189,8 @@ public class ConsumerManager {
+ 
+             if (channelInfoTable.isEmpty()) {
+                 log.warn(
+-                    "SCAN: remove expired channel from ConsumerManager consumerTable, all clear, consumerGroup={}",
+-                    group);
++                        "SCAN: remove expired channel from ConsumerManager consumerTable, all clear, consumerGroup={}",
++                        group);
+                 it.remove();
+             }
+         }
+@@ -179,7 +202,7 @@ public class ConsumerManager {
+         while (it.hasNext()) {
+             Entry<String, ConsumerGroupInfo> entry = it.next();
+             ConcurrentMap<String, SubscriptionData> subscriptionTable =
+-                entry.getValue().getSubscriptionTable();
++                    entry.getValue().getSubscriptionTable();
+             if (subscriptionTable.containsKey(topic)) {
+                 groups.add(entry.getKey());
+             }
+diff --git a/broker/src/main/java/org/apache/rocketmq/broker/client/ProducerManager.java b/broker/src/main/java/org/apache/rocketmq/broker/client/ProducerManager.java
+index e8f45e702..449590130 100644
+--- a/broker/src/main/java/org/apache/rocketmq/broker/client/ProducerManager.java
++++ b/broker/src/main/java/org/apache/rocketmq/broker/client/ProducerManager.java
+@@ -17,6 +17,7 @@
+ package org.apache.rocketmq.broker.client;
+ 
+ import io.netty.channel.Channel;
++
+ import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.HashMap;
+@@ -25,6 +26,7 @@ import java.util.List;
+ import java.util.Map;
+ import java.util.Map.Entry;
+ import java.util.concurrent.ConcurrentHashMap;
++
+ import org.apache.rocketmq.broker.util.PositiveAtomicCounter;
+ import org.apache.rocketmq.common.constant.LoggerName;
+ import org.apache.rocketmq.common.protocol.body.ProducerInfo;
+@@ -39,7 +41,7 @@ public class ProducerManager {
+     private static final long CHANNEL_EXPIRED_TIMEOUT = 1000 * 120;
+     private static final int GET_AVAILABLE_CHANNEL_RETRY_COUNT = 3;
+     private final ConcurrentHashMap<String /* group name */, ConcurrentHashMap<Channel, ClientChannelInfo>> groupChannelTable =
+-        new ConcurrentHashMap<>();
++            new ConcurrentHashMap<>();
+     private final ConcurrentHashMap<String, Channel> clientChannelTable = new ConcurrentHashMap<>();
+     private PositiveAtomicCounter positiveAtomicCounter = new PositiveAtomicCounter();
+ 
+@@ -53,7 +55,7 @@ public class ProducerManager {
+     public ProducerTableInfo getProducerTable() {
+         Map<String, List<ProducerInfo>> map = new HashMap<>();
+         for (String group : this.groupChannelTable.keySet()) {
+-            for (Entry<Channel, ClientChannelInfo> entry: this.groupChannelTable.get(group).entrySet()) {
++            for (Entry<Channel, ClientChannelInfo> entry : this.groupChannelTable.get(group).entrySet()) {
+                 ClientChannelInfo clientChannelInfo = entry.getValue();
+                 if (map.containsKey(group)) {
+                     map.get(group).add(new ProducerInfo(
+@@ -92,7 +94,9 @@ public class ProducerManager {
+                 long diff = System.currentTimeMillis() - info.getLastUpdateTimestamp();
+                 if (diff > CHANNEL_EXPIRED_TIMEOUT) {
+                     it.remove();
+-                    clientChannelTable.remove(info.getClientId());
++                    // proxy fix: update clientChannelInfoTable
++                    // remove clientChannelTable when all clientIDs closed
++                    updateChannelTable(chlMap, info);
+                     log.warn(
+                             "SCAN: remove expired channel[{}] from ProducerManager groupChannelTable, producer group name: {}",
+                             RemotingHelper.parseChannelRemoteAddr(info.getChannel()), group);
+@@ -112,7 +116,8 @@ public class ProducerManager {
+                 final ClientChannelInfo clientChannelInfo =
+                         clientChannelInfoTable.remove(channel);
+                 if (clientChannelInfo != null) {
+-                    clientChannelTable.remove(clientChannelInfo.getClientId());
++                    // proxy fix: update clientChannelInfoTable
++                    // remove clientChannelTable when all clientIDs closed                     updateChannelTable(clientChannelInfoTable, clientChannelInfo);
+                     log.info(
+                             "NETTY EVENT: remove channel[{}][{}] from ProducerManager groupChannelTable, producer group: {}",
+                             clientChannelInfo.toString(), remoteAddr, group);
+@@ -134,11 +139,11 @@ public class ProducerManager {
+         clientChannelInfoFound = channelTable.get(clientChannelInfo.getChannel());
+         if (null == clientChannelInfoFound) {
+             channelTable.put(clientChannelInfo.getChannel(), clientChannelInfo);
+-            clientChannelTable.put(clientChannelInfo.getClientId(), clientChannelInfo.getChannel());
+-            log.info("new producer connected, group: {} channel: {}", group,
+-                    clientChannelInfo.toString());
++            log.info("new producer connected, group: {} channel: {}", group, clientChannelInfo.toString());
+         }
+ 
++        // proxy fix: update clientChannelTable every heartbeat
++        clientChannelTable.put(clientChannelInfo.getClientId(), clientChannelInfo.getChannel());
+ 
+         if (clientChannelInfoFound != null) {
+             clientChannelInfoFound.setLastUpdateTimestamp(System.currentTimeMillis());
+@@ -149,7 +154,9 @@ public class ProducerManager {
+         ConcurrentHashMap<Channel, ClientChannelInfo> channelTable = this.groupChannelTable.get(group);
+         if (null != channelTable && !channelTable.isEmpty()) {
+             ClientChannelInfo old = channelTable.remove(clientChannelInfo.getChannel());
+-            clientChannelTable.remove(clientChannelInfo.getClientId());
++            // proxy fix: update clientChannelInfoTable
++            // remove clientChannelTable when all clientIDs closed
++            updateChannelTable(channelTable, clientChannelInfo);
+             if (old != null) {
+                 log.info("unregister a producer[{}] from groupChannelTable {}", group,
+                         clientChannelInfo.toString());
+@@ -162,6 +169,29 @@ public class ProducerManager {
+         }
+     }
+ 
++    public synchronized void unregisterProducerByClientId(final String group, final ClientChannelInfo inputInfo) {
++        ConcurrentHashMap<Channel, ClientChannelInfo> channelTable = this.groupChannelTable.get(group);
++        if (null != channelTable && !channelTable.isEmpty()) {
++            Iterator<Entry<Channel, ClientChannelInfo>> it = channelTable.entrySet().iterator();
++            while (it.hasNext()) {
++                Entry<Channel, ClientChannelInfo> entry = it.next();
++                ClientChannelInfo clientChannelInfo = entry.getValue();
++                if (entry.getValue().getClientId().equals(inputInfo.getClientId())) {
++                    it.remove();
++                    log.info("unregister a producer[{}] from groupChannelTable {}", group,
++                            clientChannelInfo.toString());
++                }
++            }
++
++            clientChannelTable.remove(inputInfo.getClientId());
++
++            if (channelTable.isEmpty()) {
++                this.groupChannelTable.remove(group);
++                log.info("unregister a producer group[{}] from groupChannelTable", group);
++            }
++        }
++    }
++
+     public Channel getAvailableChannel(String groupId) {
+         if (groupId == null) {
+             return null;
+@@ -205,4 +235,20 @@ public class ProducerManager {
+     public Channel findChannel(String clientId) {
+         return clientChannelTable.get(clientId);
+     }
++
++    private void updateChannelTable(ConcurrentHashMap<Channel, ClientChannelInfo> channelInfoTable, ClientChannelInfo channelInfo) {
++        String clientId = channelInfo.getClientId();
++
++        // find channel from channelInfoTable
++        // if channel exists, set the channel as then new value of clientChannelTable
++        for (ClientChannelInfo info : channelInfoTable.values()) {
++            if (info.getClientId().equals(clientId)) {
++                this.clientChannelTable.put(clientId, info.getChannel());
++                return;
++            }
++        }
++
++        // channelInfo not exists, remove
++        this.clientChannelTable.remove(clientId);
++    }
+ }
+diff --git a/broker/src/main/java/org/apache/rocketmq/broker/processor/ClientManageProcessor.java b/broker/src/main/java/org/apache/rocketmq/broker/processor/ClientManageProcessor.java
+index 74eed45a5..61a15d617 100644
+--- a/broker/src/main/java/org/apache/rocketmq/broker/processor/ClientManageProcessor.java
++++ b/broker/src/main/java/org/apache/rocketmq/broker/processor/ClientManageProcessor.java
+@@ -52,7 +52,7 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+ 
+     @Override
+     public RemotingCommand processRequest(ChannelHandlerContext ctx, RemotingCommand request)
+-        throws RemotingCommandException {
++            throws RemotingCommandException {
+         switch (request.getCode()) {
+             case RequestCode.HEART_BEAT:
+                 return this.heartBeat(ctx, request);
+@@ -60,6 +60,8 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+                 return this.unregisterClient(ctx, request);
+             case RequestCode.CHECK_CLIENT_CONFIG:
+                 return this.checkClientConfig(ctx, request);
++            case RequestCode.UNREGISTER_CLIENT_BY_CLIENTID:
++                return this.unregisterClientByClientId(ctx, request);
+             default:
+                 break;
+         }
+@@ -75,16 +77,16 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+         RemotingCommand response = RemotingCommand.createResponseCommand(null);
+         HeartbeatData heartbeatData = HeartbeatData.decode(request.getBody(), HeartbeatData.class);
+         ClientChannelInfo clientChannelInfo = new ClientChannelInfo(
+-            ctx.channel(),
+-            heartbeatData.getClientID(),
+-            request.getLanguage(),
+-            request.getVersion()
++                ctx.channel(),
++                heartbeatData.getClientID(),
++                request.getLanguage(),
++                request.getVersion()
+         );
+ 
+         for (ConsumerData data : heartbeatData.getConsumerDataSet()) {
+             SubscriptionGroupConfig subscriptionGroupConfig =
+-                this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(
+-                    data.getGroupName());
++                    this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(
++                            data.getGroupName());
+             boolean isNotifyConsumerIdsChangedEnable = true;
+             if (null != subscriptionGroupConfig) {
+                 isNotifyConsumerIdsChangedEnable = subscriptionGroupConfig.isNotifyConsumerIdsChangedEnable();
+@@ -94,32 +96,32 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+                 }
+                 String newTopic = MixAll.getRetryTopic(data.getGroupName());
+                 this.brokerController.getTopicConfigManager().createTopicInSendMessageBackMethod(
+-                    newTopic,
+-                    subscriptionGroupConfig.getRetryQueueNums(),
+-                    PermName.PERM_WRITE | PermName.PERM_READ, topicSysFlag);
++                        newTopic,
++                        subscriptionGroupConfig.getRetryQueueNums(),
++                        PermName.PERM_WRITE | PermName.PERM_READ, topicSysFlag);
+             }
+ 
+             boolean changed = this.brokerController.getConsumerManager().registerConsumer(
+-                data.getGroupName(),
+-                clientChannelInfo,
+-                data.getConsumeType(),
+-                data.getMessageModel(),
+-                data.getConsumeFromWhere(),
+-                data.getSubscriptionDataSet(),
+-                isNotifyConsumerIdsChangedEnable
++                    data.getGroupName(),
++                    clientChannelInfo,
++                    data.getConsumeType(),
++                    data.getMessageModel(),
++                    data.getConsumeFromWhere(),
++                    data.getSubscriptionDataSet(),
++                    isNotifyConsumerIdsChangedEnable
+             );
+ 
+             if (changed) {
+                 log.info("registerConsumer info changed {} {}",
+-                    data.toString(),
+-                    RemotingHelper.parseChannelRemoteAddr(ctx.channel())
++                        data.toString(),
++                        RemotingHelper.parseChannelRemoteAddr(ctx.channel())
+                 );
+             }
+         }
+ 
+         for (ProducerData data : heartbeatData.getProducerDataSet()) {
+             this.brokerController.getProducerManager().registerProducer(data.getGroupName(),
+-                clientChannelInfo);
++                    clientChannelInfo);
+         }
+         response.setCode(ResponseCode.SUCCESS);
+         response.setRemark(null);
+@@ -127,18 +129,18 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+     }
+ 
+     public RemotingCommand unregisterClient(ChannelHandlerContext ctx, RemotingCommand request)
+-        throws RemotingCommandException {
++            throws RemotingCommandException {
+         final RemotingCommand response =
+-            RemotingCommand.createResponseCommand(UnregisterClientResponseHeader.class);
++                RemotingCommand.createResponseCommand(UnregisterClientResponseHeader.class);
+         final UnregisterClientRequestHeader requestHeader =
+-            (UnregisterClientRequestHeader) request
+-                .decodeCommandCustomHeader(UnregisterClientRequestHeader.class);
++                (UnregisterClientRequestHeader) request
++                        .decodeCommandCustomHeader(UnregisterClientRequestHeader.class);
+ 
+         ClientChannelInfo clientChannelInfo = new ClientChannelInfo(
+-            ctx.channel(),
+-            requestHeader.getClientID(),
+-            request.getLanguage(),
+-            request.getVersion());
++                ctx.channel(),
++                requestHeader.getClientID(),
++                request.getLanguage(),
++                request.getVersion());
+         {
+             final String group = requestHeader.getProducerGroup();
+             if (group != null) {
+@@ -150,7 +152,7 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+             final String group = requestHeader.getConsumerGroup();
+             if (group != null) {
+                 SubscriptionGroupConfig subscriptionGroupConfig =
+-                    this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(group);
++                        this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(group);
+                 boolean isNotifyConsumerIdsChangedEnable = true;
+                 if (null != subscriptionGroupConfig) {
+                     isNotifyConsumerIdsChangedEnable = subscriptionGroupConfig.isNotifyConsumerIdsChangedEnable();
+@@ -165,11 +167,11 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+     }
+ 
+     public RemotingCommand checkClientConfig(ChannelHandlerContext ctx, RemotingCommand request)
+-        throws RemotingCommandException {
++            throws RemotingCommandException {
+         final RemotingCommand response = RemotingCommand.createResponseCommand(null);
+ 
+         CheckClientRequestBody requestBody = CheckClientRequestBody.decode(request.getBody(),
+-            CheckClientRequestBody.class);
++                CheckClientRequestBody.class);
+ 
+         if (requestBody != null && requestBody.getSubscriptionData() != null) {
+             SubscriptionData subscriptionData = requestBody.getSubscriptionData();
+@@ -190,7 +192,7 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+                 FilterFactory.INSTANCE.get(subscriptionData.getExpressionType()).compile(subscriptionData.getSubString());
+             } catch (Exception e) {
+                 log.warn("Client {}@{} filter message, but failed to compile expression! sub={}, error={}",
+-                    requestBody.getClientId(), requestBody.getGroup(), requestBody.getSubscriptionData(), e.getMessage());
++                        requestBody.getClientId(), requestBody.getGroup(), requestBody.getSubscriptionData(), e.getMessage());
+                 response.setCode(ResponseCode.SUBSCRIPTION_PARSE_FAILED);
+                 response.setRemark(e.getMessage());
+                 return response;
+@@ -201,4 +203,46 @@ public class ClientManageProcessor extends AsyncNettyRequestProcessor {
+         response.setRemark(null);
+         return response;
+     }
++
++    /**
++     * unregister producer & consumer  by clientId
++     *
++     * @param ctx
++     * @param request
++     * @return
++     * @throws RemotingCommandException
++     */
++    public RemotingCommand unregisterClientByClientId(ChannelHandlerContext ctx, RemotingCommand request) throws RemotingCommandException {
++        final RemotingCommand response =
++                RemotingCommand.createResponseCommand(UnregisterClientResponseHeader.class);
++        final UnregisterClientRequestHeader requestHeader =
++                (UnregisterClientRequestHeader) request
++                        .decodeCommandCustomHeader(UnregisterClientRequestHeader.class);
++        ClientChannelInfo clientChannelInfo = new ClientChannelInfo(
++                ctx.channel(),
++                requestHeader.getClientID(),
++                request.getLanguage(),
++                request.getVersion());
++
++        // remove producer info
++        {
++            final String group = requestHeader.getProducerGroup();
++            if (group != null) {
++                brokerController.getProducerManager().unregisterProducerByClientId(group, clientChannelInfo);
++            }
++        }
++
++        // remove consumer info, close channel
++        // do not notify other consumers
++        {
++            final String group = requestHeader.getConsumerGroup();
++            if (group != null) {
++                this.brokerController.getConsumerManager().unregisterConsumerByClientId(group, clientChannelInfo, false);
++            }
++        }
++
++        response.setCode(ResponseCode.SUCCESS);
++        response.setRemark(null);
++        return response;
++    }
+ }
+diff --git a/common/src/main/java/org/apache/rocketmq/common/protocol/RequestCode.java b/common/src/main/java/org/apache/rocketmq/common/protocol/RequestCode.java
+index 9912382ff..ed2b077ac 100644
+--- a/common/src/main/java/org/apache/rocketmq/common/protocol/RequestCode.java
++++ b/common/src/main/java/org/apache/rocketmq/common/protocol/RequestCode.java
+@@ -194,4 +194,6 @@ public class RequestCode {
+     public static final int GET_ALL_PRODUCER_INFO = 328;
+ 
+     public static final int DELETE_EXPIRED_COMMITLOG = 329;
++
++    public static final int UNREGISTER_CLIENT_BY_CLIENTID = 226123501;
+ }

@@ -1,0 +1,15 @@
+global:
+  topic: TopicTest
+  consumer:
+    broadcasting:
+      group: test-consume-reply-broadcasting-group
+    clustering:
+      group: test-consume-reply-clustering-group
+
+rocketmq:
+  name-server: 127.0.0.1:9876
+  consumer:
+    enable-msg-trace: true
+  producer:
+    group: test-send-reply-group
+    enable-msg-trace: true
